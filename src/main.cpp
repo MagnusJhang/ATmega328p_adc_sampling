@@ -1,7 +1,22 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
-#include <TimerOne.h>
-#define M_DEBUG
+#define FCLK_8M
+// #define M_DEBUG
+
+#ifndef FASTPWM
+    #ifdef FCLK_8M //Set the sampling rate as 360Hz on fclk=8MHz
+    #define C_TCNT1H 169
+    #define C_TCNT1L 48
+    #else //Set the sampling rate as 360Hz on fclk=16MHz
+    #define C_TCNT1H 82
+    #define C_TCNT1L 98
+    #endif
+#else
+    #define C_OCR1AH 173
+    #define C_OCR1AL 158
+#endif
+
+//
 
 #define BT_RX 6
 #define BT_TX 5
@@ -30,47 +45,66 @@ inline void send(int samp_idx){
 	Serial.println(samp1_buff[samp_idx]);
 #endif
 }
-ISR(ADC_VECT){
-	samp1_buff[wr_pos] = analogRead(A0);
-	wr_pos = !(wr_pos == LAST_BUFF_IDX) ? wr_pos + 1 : 0;
-	cnt++;
+
+ISR(TIMER1_OVF_vect) {
+  TCNT1H = C_TCNT1H;
+  TCNT1L = C_TCNT1L;
 }
 
-void sampling(){
-	
-	ADCSRA |= 1 << ADSC;
+ISR(ADC_vect){
+    samp1_buff[wr_pos] = ADCL | (ADCH << 8);
+    wr_pos = !(wr_pos == LAST_BUFF_IDX) ? wr_pos + 1 : 0;
+    cnt++;
+}
 
-	
+void init_timer1(){
+	TIMSK1 |= 1 << TOIE1;	
+  	TCCR1A = 0X00;
+//FAST PWM MODE
+//   TCCR1A |= (1 << WGM11) | (1 << WGM10);
+//   TCCR1B |= (1 << WGM13) | (1 << WGM12);
+//   OCR1AH = C_OCR1AH;
+//   OCR1AL = C_OCR1AL;
+}
+
+void init_adc0(){
+	ADCSRA |=  (1 << ADPS2) | (1 << ADPS0);
+	ADCSRA &=  ~(1 << ADPS1);  // 0
+	ADCSRB |= (1 << ADTS2) | (1 << ADTS1); //TIMER/COUNTER1 overflow
+	ADCSRA |= 1 << ADATE; //AUTO TRIGGER ENABLE
+	ADMUX  = 0b01000000;      // C2:: Use AVCC and A0 as input to ADC
+}
+
+void samp_ctl(bool en){
+	if(en){
+		// TCNT1H = C_TCNT1H;
+  		// TCNT1L = C_TCHT1L;
+  		ADCSRA |= 1 << ADEN;
+  		ADCSRA |= 1 << ADIE;
+		TCCR1B = 0X01;
+		sei();
+	}else{
+		ADCSRA &= ~(1 << ADEN);
+		ADCSRA &= ~(1 << ADIE);
+  		TCCR1B = 0X00;
+	}
 }
 
 void setup() {
-#ifdef M_DEBUG
 	Serial.begin(115200);
-#endif
 	BT.begin(BAUD_RATE);
+
 	pinMode(13, OUTPUT);
 	pinMode(A0, INPUT);
 	digitalWrite(13, HIGH);
+	init_adc0();
+	init_timer1();
 	delay(500);
 	digitalWrite(13, LOW);
 	
-	ADCSRA |= 1 << ADEN;
-	ADCSRA |= 1 << ADIE;
-	//ADC_ENABLE True
-	ADCSRA |= 1 << ADPS0;
-	ADCSRA |= 1 << ADPS1; 
-	//prescalar: 16
-	ADMUX &= 0xf0; //ADC0
-	ADMUX |= 1 << ADLAR;
-	
-	//HIGH BYTE FIRST
-
-	Timer1.initialize(period_us);
-	Timer1.attachInterrupt(sampling); 
-	Timer1.stop(); 
   	rd_pos = 0;
     wr_pos = 0;
-	
+	Serial.println("setup");
 }
 
 void loop() {
@@ -80,19 +114,19 @@ void loop() {
 			rd_pos = 0;
     		wr_pos = 0;
 			cnt = 0;
-			Timer1.start();
 			sample_en = true;
 			digitalWrite(13, HIGH);
 			st_time = millis();
+			Serial.println(F("START"));
 		} else if (v == BLE_WR_DIS) {
-			Timer1.stop();
 			sample_en = false;
 			digitalWrite(13, LOW);
 			Serial.print(F("Done: "));
 			Serial.print((millis() - st_time)/1000.0);
-			Serial.print(", act:");
+			Serial.print(F(", act:"));
 			Serial.println(((double)cnt*period_us)/1000000);
 		}
+		samp_ctl(sample_en);
   	}
 	delay(50);
   	if(sample_en){
