@@ -1,22 +1,29 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
-#define FCLK_8M
+// #define FCLK_8M
+#define FASTPWM
 // #define M_DEBUG
 
 #ifndef FASTPWM
     #ifdef FCLK_8M //Set the sampling rate as 360Hz on fclk=8MHz
-    #define C_TCNT1H 169
-    #define C_TCNT1L 48
+		#define C_TCNT1H 169
+		#define C_TCNT1L 48
     #else //Set the sampling rate as 360Hz on fclk=16MHz
-    #define C_TCNT1H 82
-    #define C_TCNT1L 98
+		#define C_TCNT1H 82
+		#define C_TCNT1L 98
     #endif
 #else
-    #define C_OCR1AH 173
-    #define C_OCR1AL 158
-#endif
+	#ifdef FCLK_8M
+		#define C_OCR1AH 86
+		#define C_OCR1AL 207
+	#else
+		//16MHz / 360Hz = 44446 ticks
+    	#define C_OCR1AH 173
+    	#define C_OCR1AL 182
+		//The cr
 
-//
+	#endif
+#endif
 
 #define BT_RX 6
 #define BT_TX 5
@@ -47,24 +54,35 @@ inline void send(int samp_idx){
 }
 
 ISR(TIMER1_OVF_vect) {
-  TCNT1H = C_TCNT1H;
-  TCNT1L = C_TCNT1L;
+#ifndef FASTPWM
+	TCNT1H = C_TCNT1H;
+	TCNT1L = C_TCNT1L;
+#else
+
+#endif
+	PORTB ^= 1 << PB0;
 }
 
 ISR(ADC_vect){
     samp1_buff[wr_pos] = ADCL | (ADCH << 8);
     wr_pos = !(wr_pos == LAST_BUFF_IDX) ? wr_pos + 1 : 0;
     cnt++;
+	PORTB ^= 1 << PB4;
+	
 }
 
 void init_timer1(){
-	TIMSK1 |= 1 << TOIE1;	
-  	TCCR1A = 0X00;
+	// 
+	TCCR1A = 0x00;
+	TCCR1B = 0x00;
+	TIMSK1 |= 1 << TOIE1;
+#ifdef FASTPWM
 //FAST PWM MODE
-//   TCCR1A |= (1 << WGM11) | (1 << WGM10);
-//   TCCR1B |= (1 << WGM13) | (1 << WGM12);
-//   OCR1AH = C_OCR1AH;
-//   OCR1AL = C_OCR1AL;
+	TCCR1A |= (1 << WGM11) | (1 << WGM10);
+	TCCR1B |= (1 << WGM13) | (1 << WGM12);
+	OCR1AH = C_OCR1AH;
+	OCR1AL = C_OCR1AL;
+#endif
 }
 
 void init_adc0(){
@@ -77,20 +95,25 @@ void init_adc0(){
 
 void samp_ctl(bool en){
 	if(en){
-		// TCNT1H = C_TCNT1H;
-  		// TCNT1L = C_TCHT1L;
+		#ifndef FASTPWM
+		TCNT1H = C_TCNT1H;
+  		TCNT1L = C_TCNT1L;
+		#endif
   		ADCSRA |= 1 << ADEN;
   		ADCSRA |= 1 << ADIE;
-		TCCR1B = 0X01;
+		TCCR1B |= 1 << CS10;
 		sei();
 	}else{
 		ADCSRA &= ~(1 << ADEN);
 		ADCSRA &= ~(1 << ADIE);
-  		TCCR1B = 0X00;
+  		TCCR1B &= ~(1 << CS10);
 	}
 }
 
 void setup() {
+	DDRB |= (1 << PB0) | (1 << PB4) | (1<<PB1);
+	// DDRD |= (1 << PD5);
+
 	Serial.begin(115200);
 	BT.begin(BAUD_RATE);
 
