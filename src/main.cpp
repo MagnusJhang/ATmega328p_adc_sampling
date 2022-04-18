@@ -1,18 +1,13 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
+#include <avr/sleep.h>
 // #define FCLK_8M
 #define FASTPWM
-// #define M_DEBUG
+// #define CHECK_ON_TRIG
+#define ADC_NOISE_REDUCTION
+// #define ENABLE_SMAPLEING_AT_STARTUP
 
-#ifndef FASTPWM
-    #ifdef FCLK_8M //Set the sampling rate as 360Hz on fclk=8MHz
-		#define C_TCNT1H 169
-		#define C_TCNT1L 48
-    #else //Set the sampling rate as 360Hz on fclk=16MHz
-		#define C_TCNT1H 82
-		#define C_TCNT1L 98
-    #endif
-#else
+#ifdef FASTPWM //WGM MODE 15 in Timer1, 
 	#ifdef FCLK_8M
 		#define C_OCR1AH 86
 		#define C_OCR1AL 207
@@ -20,9 +15,18 @@
 		//16MHz / 360Hz = 44446 ticks
     	#define C_OCR1AH 173
     	#define C_OCR1AL 182
-		//The cr
-
 	#endif
+	// It is necessary to fine-tune the C_OCR1AL value 
+	// since the fclk is not always 16MHz or 8MHz for every board.
+    
+#else //WGM MODE 0 in Timer1
+	#ifdef FCLK_8M //Set the sampling rate as 360Hz on fclk=8MHz
+		#define C_TCNT1H 169
+		#define C_TCNT1L 48
+    #else //Set the sampling rate as 360Hz on fclk=16MHz
+		#define C_TCNT1H 82
+		#define C_TCNT1L 98
+    #endif
 #endif
 
 #define BT_RX 6
@@ -46,9 +50,10 @@ uint16_t wr_pos = 0;
 bool sample_en = false;
 
 inline void send(int samp_idx){
+#ifndef ENABLE_SMAPLEING_AT_STARTUP
 	char a[] = {0x80 | (samp1_buff[samp_idx]>>6), 0x40 | (samp1_buff[samp_idx] & 0x003f)};
 	BT.write(a, 2);
-#ifdef M_DEBUG
+#else
 	Serial.println(samp1_buff[samp_idx]);
 #endif
 }
@@ -57,39 +62,54 @@ ISR(TIMER1_OVF_vect) {
 #ifndef FASTPWM
 	TCNT1H = C_TCNT1H;
 	TCNT1L = C_TCNT1L;
-#else
-
 #endif
+#ifdef CHECK_ON_TRIG
 	PORTB ^= 1 << PB0;
+#endif
+
+#ifdef ADC_NOISE_REDUCTION
+	ADCSRA |= 1 << ADSC;
+#endif
 }
 
 ISR(ADC_vect){
     samp1_buff[wr_pos] = ADCL | (ADCH << 8);
     wr_pos = !(wr_pos == LAST_BUFF_IDX) ? wr_pos + 1 : 0;
     cnt++;
-	PORTB ^= 1 << PB4;
 	
+#ifdef CHECK_ON_TRIG
+	PORTB ^= 1 << PB4;
+#endif
 }
 
 void init_timer1(){
 	// 
 	TCCR1A = 0x00;
 	TCCR1B = 0x00;
-	TIMSK1 |= 1 << TOIE1;
+	TIMSK1 |= 1 << TOIE1; //ENABLE overflow interrupt of Timer2
 #ifdef FASTPWM
-//FAST PWM MODE
 	TCCR1A |= (1 << WGM11) | (1 << WGM10);
 	TCCR1B |= (1 << WGM13) | (1 << WGM12);
+	//Set the TOP to OCR1A
 	OCR1AH = C_OCR1AH;
 	OCR1AL = C_OCR1AL;
+	//Trigger the OVF1 Flag when TCNT1 = OCR1A
 #endif
 }
 
 void init_adc0(){
-	ADCSRA |=  (1 << ADPS2) | (1 << ADPS0);
-	ADCSRA &=  ~(1 << ADPS1);  // 0
-	ADCSRB |= (1 << ADTS2) | (1 << ADTS1); //TIMER/COUNTER1 overflow
+	DIDR0 = 0x00; //disable digital input in a0-a7
+#ifdef ADC_NOISE_REDUCTION
+	SMCR = 1 << SM0;
+	SMCR = 1 << SE;
+#else
+	ADCSRB |= (1 << ADTS2) | (1 << ADTS1); //TIMER/COUNTER1 overflow, TOVF1
 	ADCSRA |= 1 << ADATE; //AUTO TRIGGER ENABLE
+#endif
+	ADCSRA |=  (1 << ADPS2) | (1 << ADPS0);
+	ADCSRA &=  ~(1 << ADPS1);  
+	// ADPS. 3'b101: CLK_ADC Prescaler: 32
+
 	ADMUX  = 0b01000000;      // C2:: Use AVCC and A0 as input to ADC
 }
 
@@ -98,10 +118,11 @@ void samp_ctl(bool en){
 		#ifndef FASTPWM
 		TCNT1H = C_TCNT1H;
   		TCNT1L = C_TCNT1L;
+		//Move the TCNT to the specify in normal mode
 		#endif
-  		ADCSRA |= 1 << ADEN;
-  		ADCSRA |= 1 << ADIE;
-		TCCR1B |= 1 << CS10;
+  		ADCSRA |= 1 << ADEN; //ENABLE ADC
+  		ADCSRA |= 1 << ADIE; //ADC interrupt
+		TCCR1B |= 1 << CS10; //ENABLE Timer1 set prescaler to 1
 		sei();
 	}else{
 		ADCSRA &= ~(1 << ADEN);
@@ -111,26 +132,32 @@ void samp_ctl(bool en){
 }
 
 void setup() {
-	DDRB |= (1 << PB0) | (1 << PB4) | (1<<PB1);
-	// DDRD |= (1 << PD5);
-
 	Serial.begin(115200);
 	BT.begin(BAUD_RATE);
+	rd_pos = 0;
+	wr_pos = 0;
+	Serial.println(F("setup"));
+#ifdef CHECK_ON_TRIG
+	DDRB |= (1 << PB0) | (1 << PB4) | (1<<PB1);
+	// DDRD |= (1 << PD5);
+#endif
 
 	pinMode(13, OUTPUT);
-	pinMode(A0, INPUT);
 	digitalWrite(13, HIGH);
 	init_adc0();
 	init_timer1();
+#ifdef ENABLE_SMAPLEING_AT_STARTUP
+	Serial.println(F("Enable sampling."));
+	sample_en = true;
+	samp_ctl(sample_en);
+#endif	
+	
 	delay(500);
 	digitalWrite(13, LOW);
-	
-  	rd_pos = 0;
-    wr_pos = 0;
-	Serial.println("setup");
 }
 
 void loop() {
+#ifndef ENABLE_SMAPLEING_AT_STARTUP
 	if (BT.available()) {
     	char v = BT.read();
 		if (v == BLE_WR_EN) {
@@ -146,11 +173,10 @@ void loop() {
 			digitalWrite(13, LOW);
 			Serial.print(F("Done: "));
 			Serial.print((millis() - st_time)/1000.0);
-			Serial.print(F(", act:"));
-			Serial.println(((double)cnt*period_us)/1000000);
 		}
 		samp_ctl(sample_en);
   	}
+#endif	  
 	delay(50);
   	if(sample_en){
 		uint16_t t_wr_pos = wr_pos;
@@ -164,6 +190,8 @@ void loop() {
 
 			for(rd_pos=0; rd_pos < t_wr_pos; rd_pos++)
 				send(rd_pos);
+		}else{
+			Serial.println(".");
 		}
 	}
 }
